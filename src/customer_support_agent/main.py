@@ -495,17 +495,21 @@ async def invoke(payload, context=None):
         memory_id=MEMORY_ID,
     )
 
+    agent_core_browser = AgentCoreBrowser(region=REGION)
+    tools.append(agent_core_browser.browser)
+
     # - Code uses `app.run()` as the main entry point.
     # - Submitted test output shows the agent responding to an `agentcore invoke` command without errors.
     mcp_client = MCPClient(lambda: streamable_http_client(GATEWAY_URL))
 
     with mcp_client:
         gateway_tools = mcp_client.list_tools_sync()
+        tools.extend(gateway_tools)
 
         agent = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            tools=tools + gateway_tools,
+            tools=tools,
             hooks=[memory_hook],
             state={"session_id": session_id, "actor_id": actor_id},
         )
