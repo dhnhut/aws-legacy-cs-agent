@@ -341,14 +341,70 @@ def calculate_loyalty_discount(
     """
     # TODO: Build the code string (use an f-string to inject the arguments)
     code = ""  # Replace with your code string
+    code = f"""
+import json
+
+earn_rates = {{"standard": 1, "device": 2, "fresh": 5}}
+tier_rates = {{"Silver": 0.00, "Gold": 0.10, "Platinum": 0.15}}
+
+loyalty_points = {loyalty_points}
+tier = "{tier}"
+order_total = {order_total}
+product_category = "{product_category}"
+
+tier_discount_pct = tier_rates.get(tier, 0.0)
+
+# 100 points = $1; cap redemption at 50% of the order, floor to nearest 500 points
+max_redeemable_points = int(order_total * 0.5 * 100)
+points_redeemed = max(0, min(loyalty_points, max_redeemable_points) // 500 * 500)
+redeemed_value = points_redeemed / 100
+
+subtotal = order_total - redeemed_value
+tier_discount = subtotal * tier_discount_pct
+final_total = subtotal - tier_discount
+total_savings = order_total - final_total
+
+points_earned = int(final_total * earn_rates.get(product_category, 1))
+remaining_points = loyalty_points - points_redeemed + points_earned
+
+result = {{
+    "points_redeemed": points_redeemed,
+    "tier_discount_pct": tier_discount_pct,
+    "final_total": round(final_total, 2),
+    "remaining_points": remaining_points,
+    "total_savings": round(total_savings, 2),
+    "points_earned": points_earned,
+}}
+
+print(json.dumps(result))
+"""
 
     try:
         # TODO: Execute the code using code_session and return the result
-        pass
+        with code_session(REGION) as code_client:
+            response = code_client.invoke("executeCode", {
+                "code": code,
+                "language": "python",
+                "clearContext": True,
+            })
+            for event in response["stream"]:
+                if "result" in event:
+                    return event["result"]["content"][0]["text"]
+            return json.dumps({"error": "No result returned from code interpreter"})
 
     except Exception as e:
         # TODO: Implement fallback calculation using tier discount only
-        pass
+        tier_rates = {"Silver": 0.00, "Gold": 0.10, "Platinum": 0.15}
+        tier_discount_pct = tier_rates.get(tier, 0.0)
+        tier_discount = order_total * tier_discount_pct
+        final_total = order_total - tier_discount
+        return json.dumps({
+            "points_redeemed": 0,
+            "tier_discount_pct": tier_discount_pct,
+            "final_total": round(final_total, 2),
+            "remaining_points": loyalty_points,
+            "note": f"Code interpreter unavailable ({e}); tier-only discount applied.",
+        })
 
 
 # ── TODO 8 — Agent Entrypoint ─────────────────────────────────────────────────
@@ -410,7 +466,7 @@ MEMORY-AWARE BEHAVIOUR
 Be warm, attentive, and genuinely helpful — like a trusted assistant who has known the customer for years.
 """
 
-tools = []
+tools = [search_knowledge_base, calculate_loyalty_discount]
 
 
 @app.entrypoint
@@ -428,7 +484,8 @@ async def invoke(payload, context=None):
     prompt = payload.get("prompt", "")
     if not prompt:
         raise ValueError("Error: 'prompt' is required in the payload.")
-    actor_id = payload.get("customer_id") or payload.get("actor_id") or str(uuid.uuid4())
+    actor_id = payload.get("customer_id") or payload.get(
+        "actor_id") or str(uuid.uuid4())
     session_id = payload.get("session_id", str(uuid.uuid4()))
 
     memory_hook = MemoryHook(
