@@ -76,7 +76,7 @@ os.environ["BYPASS_TOOL_CONSENT"] = "true"
 GATEWAY_URL = "https://ecom-customersupportgateway-iukqfukqpg.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
 KB_ID = "6WYIMJJSR2"
 REGION = "us-east-1"
-MEMORY_ID = "Ecom_EcomCSMemory-43cmBo9Ai9"
+MEMORY_ID = "legacy_cs_mem-O3dMxmDW5L"
 
 
 # ── TODO 3 — Model and Clients ────────────────────────────────────────────────
@@ -105,19 +105,23 @@ _bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=REGION)
 # ── TODO 4 — Namespace Helper ─────────────────────────────────────────────────
 # Implement get_namespaces() to return a dict mapping strategy type to
 # namespace template string.
-#
-# Steps:
-#   1. Call mem_client.get_memory_strategies(memory_id) to get strategy list
-#   2. Return a dict: { strategy["type"]: strategy["namespaces"][0] for each strategy }
-#
-# Example output:
-#   { "SEMANTIC": "cs_agent/{actorId}/facts",
-#     "USER_PREFERENCE": "cs_agent/{actorId}/preferences" }
-
 def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict:
     """Return a dict mapping strategy type → namespace template string."""
     # TODO: Implement this function
-    pass
+    # Steps:
+    #   1. Call mem_client.get_memory_strategies(memory_id) to get strategy list
+    strategies = mem_client.get_memory_strategies(memory_id)
+
+    #   2. Return a dict: { strategy["type"]: strategy["namespaces"][0] for each strategy }
+    #
+    # Example output:
+    #   { "SEMANTIC": "cs_agent/{actorId}/facts",
+    #     "USER_PREFERENCE": "cs_agent/{actorId}/preferences" }
+    return {
+        strategy["type"]: (strategy.get("namespaceTemplates")
+                           or strategy["namespaces"])[0]
+        for strategy in strategies
+    }
 
 
 # ── TODO 5 — Memory Hook ──────────────────────────────────────────────────────
@@ -145,7 +149,6 @@ def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict:
 #   register_hooks(self, registry: HookRegistry)
 #     — register retrieve_customer_context on MessageAddedEvent
 #     — register save_support_interaction on AfterInvocationEvent
-
 class MemoryHook(HookProvider):
     """Long-term memory hook for the customer support agent."""
 
@@ -157,53 +160,109 @@ class MemoryHook(HookProvider):
         memory_id: str,
     ):
         # TODO: Store actor_id, session_id, memory_id, memory_client as attributes
+        self.actor_id = actor_id
+        self.session_id = session_id
+        self.memory_client = memory_client
+        self.memory_id = memory_id
+
         # TODO: Call get_namespaces() and store the result as self.namespaces
-        pass
+        self.namespaces = get_namespaces(memory_client, memory_id)
 
     def retrieve_customer_context(self, event: MessageAddedEvent):
         """Retrieve relevant memories and prepend them to the user message."""
         # TODO: Implement memory retrieval
         # Steps:
         #   1. Get the last message from event.agent.messages
+        message = event.message
         #   2. Check it is a user message and not a tool result
+        if message["role"] != "user":
+            return
         #   3. Extract the user query text
+        content = message.get("content", [])
+        if any("toolResult" in block for block in content):
+            return
+        query = "\n".join(block["text"]
+                          for block in content if "text" in block)
+        if not query:
+            return
+
+        context_lines = []
         #   4. For each namespace in self.namespaces, call retrieve_memories()
+        for strategy_type, namespace_template in self.namespaces.items():
+            namespace = namespace_template.replace(
+                "{actorId}", self.actor_id
+            ).replace("{sessionId}", self.session_id)
+            records = self.memory_client.retrieve_memories(
+                self.memory_id, namespace=namespace, query=query, top_k=5,
+            )
         #   5. Collect non-empty memory texts with strategy type tags
+            for record in records:
+                text = record.get("content", {}).get("text", "")
+                if text:
+                    context_lines.append(f"[{strategy_type}] {text}")
+
+        if not context_lines:
+            return
+
         #   6. If any found, prepend them to the user message
-        pass
+        memories_block = "\n".join(context_lines)
+        for block in content:
+            if "text" in block:
+                block["text"] = f"Customer Context:\n{memories_block}\n\n{block['text']}"
+                break
 
     def save_support_interaction(self, event: AfterInvocationEvent):
         """Save the completed turn to memory after the agent responds."""
         # TODO: Implement memory saving
         # Steps:
         #   1. Get messages from event.agent.messages
+        messages = event.agent.messages
+
         #   2. Walk backwards to find the last user query (plain text)
         #      and the last assistant response
+        user_query = None
+        assistant_response = None
+        for message in reversed(messages):
+            content = message.get("content", [])
+            if any("toolResult" in block or "toolUse" in block for block in content):
+                continue
+            text = "\n".join(block["text"]
+                             for block in content if "text" in block)
+            if not text:
+                continue
+            if assistant_response is None and message["role"] == "assistant":
+                assistant_response = text
+            elif user_query is None and message["role"] == "user":
+                user_query = text
+            if user_query and assistant_response:
+                break
+
+        if not (user_query and assistant_response):
+            return
         #   3. Call memory_client.create_event() with both messages
-        pass
+        self.memory_client.create_event(
+            self.memory_id,
+            self.actor_id,
+            self.session_id,
+            messages=[(user_query, "USER"), (assistant_response, "ASSISTANT")],
+        )
 
     def register_hooks(self, registry: HookRegistry) -> None:  # type: ignore
         """Register both memory callbacks."""
         # TODO: Register retrieve_customer_context on MessageAddedEvent
+        registry.add_callback(
+            MessageAddedEvent, self.retrieve_customer_context)
+
         # TODO: Register save_support_interaction on AfterInvocationEvent
-        pass
+        registry.add_callback(AfterInvocationEvent,
+                              self.save_support_interaction)
 
 
 # ── TODO 6 — Knowledge Base Tool ─────────────────────────────────────────────
 # Implement search_knowledge_base(query) using the @tool decorator.
 #
-# Steps:
-#   1. Guard: if KB_ID is empty return "Knowledge base not configured."
-#   2. Call _bedrock_runtime.retrieve(
-#          knowledgeBaseId=KB_ID,
-#          retrievalQuery={"text": query}
-#      )
-#   3. Extract resp["retrievalResults"]; return a message if empty
-#   4. Join the text chunks with "\n---\n" and return the result
-#
 # The docstring is the tool description — the model uses it to decide when
 # to call this tool, so keep it clear and accurate.
-
 @tool
 def search_knowledge_base(query: str) -> str:
     """
@@ -219,17 +278,26 @@ def search_knowledge_base(query: str) -> str:
     """
 
     # TODO: Implement the Knowledge Base search
+    #
+    # Steps:
+    #   1. Guard: if KB_ID is empty return "Knowledge base not configured."
     if not KB_ID:
         return "Knowledge base not configured."
 
+    #   2. Call _bedrock_runtime.retrieve(
+    #          knowledgeBaseId=KB_ID,
+    #          retrievalQuery={"text": query}
+    #      )
     response = _bedrock_runtime.retrieve(
         knowledgeBaseId=KB_ID,
         retrievalQuery={"text": query},
     )
+    #   3. Extract resp["retrievalResults"]; return a message if empty
     results = response.get("retrievalResults", [])
     if not results:
         return "No relevant information found in the knowledge base."
 
+    #   4. Join the text chunks with "\n---\n" and return the result
     chunks = [r["content"]["text"] for r in results]
     return "\n---\n".join(chunks)
 
@@ -360,8 +428,15 @@ async def invoke(payload, context=None):
     prompt = payload.get("prompt", "")
     if not prompt:
         raise ValueError("Error: 'prompt' is required in the payload.")
-    actor_id = payload.get("actor_id", str(uuid.uuid4()))
+    actor_id = payload.get("customer_id") or payload.get("actor_id") or str(uuid.uuid4())
     session_id = payload.get("session_id", str(uuid.uuid4()))
+
+    memory_hook = MemoryHook(
+        actor_id=actor_id,
+        session_id=session_id,
+        memory_client=memory_client,
+        memory_id=MEMORY_ID,
+    )
 
     # - Code uses `app.run()` as the main entry point.
     # - Submitted test output shows the agent responding to an `agentcore invoke` command without errors.
@@ -374,6 +449,7 @@ async def invoke(payload, context=None):
             model=model,
             system_prompt=SYSTEM_PROMPT,
             tools=tools + gateway_tools,
+            hooks=[memory_hook],
             state={"session_id": session_id, "actor_id": actor_id},
         )
 

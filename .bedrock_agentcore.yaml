@@ -32,7 +32,7 @@ agents:
     bedrock_agentcore:
       agent_id: legacy_cs-wf1J24Ch5y
       agent_arn: arn:aws:bedrock-agentcore:us-east-1:566068566473:runtime/legacy_cs-wf1J24Ch5y
-      agent_session_id: a5a35352-c6c5-4325-81ba-5ed98b058b48
+      agent_session_id: 0b6723b4-21e8-47ca-bc4f-b5568d3a490a
     codebuild:
       project_name: null
       execution_role: null
